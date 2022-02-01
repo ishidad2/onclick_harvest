@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous">
+  <title>ワンクリックハーベスト設定</title>
+</head>
+<body>
+  <div class="container">
+    <div class="card mt-3 mb-3">
+      <div class="card-body">
+        <div class="mb-3">
+          <label for="node" class="form-label">ノード</label>
+          <input type="text" class="form-control" id="node" placeholder="例）yamatanoorochi.sfn.tools https://や:3001などは不要 httpsに対応したノードのみ">
+          <label for="privateKey" class="form-label">秘密鍵</label>
+          <input type="password" class="form-control" id="privateKey">
+          <div class="alert alert-primary mt-3" role="alert">
+            <div id="tx"></div>
+          </div>
+          <div class="d-grid gap-2 col-6 mx-auto mt-3">
+            <button class="btn btn-primary" id="txBtn" type="button">１．トランザクション生成</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-body">
+        <div class="alert alert-primary mt-3" role="alert">
+          <div id="ex"><a href="#" target="_blank" rel="noopener noreferrer"></a></div>
+        </div>
+        <div class="mb-3">
+          <div class="d-grid gap-2 col-6 mx-auto mt-3">
+            <button class="btn btn-primary" id="networkSendBtn" type="button">２．トランザクションをネットワークにアナウンス</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM" crossorigin="anonymous"></script>
+  <script src="https://xembook.github.io/nem2-browserify/symbol-sdk-1.0.2.js"></script>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js" integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
+  <script>
+    const symbolSdk = require("/node_modules/symbol-sdk");
+    /** === テストネット === **/
+    const node = "https://yamatanoorochi.sfn.tools:3001";
+    const mosaic_id = "3A8416DB2D53B6C8";
+    const networkType = symbolSdk.NetworkType.TEST_NET;
+    const explorer = "https://testnet.symbol.fyi/transactions/";
+    /** === テストネット === **/
+    /** === メインネット === **/
+//    const node = "https://dai-dhealth.sfn.tools:3001";
+//    const mosaic_id = "6BED913FA20223F8";
+//    const networkType = symbolSdk.NetworkType.MAIN_NET;
+//    const explorer = "https://symbol.fyi/transactions/";
+    /** === メインネット === **/
+    const repositoryFactory = new symbolSdk.RepositoryFactoryHttp(node);
+    const transactionRepository = repositoryFactory.createTransactionRepository();
+    const networkRepository = repositoryFactory.createNetworkRepository();
+    const accountRepository = repositoryFactory.createAccountRepository();
+    let networkGenerationHash = null;
+    let medianFeeMultiplier = null;
+    let epochAdjustment = null;
+    let signedTransaction = null;
+
+    $(async () => {
+      // GenerationHashの取得
+      networkGenerationHash = await repositoryFactory.getGenerationHash().toPromise();
+      // 最小手数料係数を取得
+      medianFeeMultiplier = (await networkRepository.getTransactionFees().toPromise()).medianFeeMultiplier;
+    });
+
+    /**
+     * 1. トランザクション生成ボタンの処理
+     * **/
+    $('#txBtn').on('click', async function(){
+      
+      //委任先ノードの取得
+      const node = $('#node').val();
+      //委任アドレスの取得
+      const privateKey = $('#privateKey').val();
+      const account = symbolSdk.Account.createFromPrivateKey(privateKey, networkType);
+      const accountInfo = await accountRepository.getAccountInfo(account.address).toPromise();
+      
+      let transactionList = [];
+
+      //ノードのパプリックキーを取得
+      const nodeHttp = new symbolSdk.NodeHttp('https://' + node + ':3001');
+      const nodeInfo = await nodeHttp.getNodeInfo().toPromise();
+
+      // epochAdjustmentの取得
+      epochAdjustment = await repositoryFactory.getEpochAdjustment().toPromise();
+
+      //リモートアカウントの生成
+      const remoteAccount = symbolSdk.Account.generateNewAccount(networkType);
+      //VRFアカウントの生成
+      const vrfAccount = symbolSdk.Account.generateNewAccount(networkType);
+
+
+      //委任しているようであれば解除トランザクション作成
+      if(accountInfo.supplementalPublicKeys.linked){
+        //AccountKeyLinkTransaction （解除）
+        const accountUnLinkTransaction = symbolSdk.AccountKeyLinkTransaction.create(
+          symbolSdk.Deadline.create(epochAdjustment),
+          accountInfo.supplementalPublicKeys.linked.publicKey,
+          symbolSdk.LinkAction.Unlink,
+          networkType,
+        );
+        transactionList.push(accountUnLinkTransaction.toAggregate(account.publicAccount));
+      }
+
+      if(accountInfo.supplementalPublicKeys.vrf){
+        //VrfKeyLinkTransaction （解除）
+        const vrfUnLinkTransaction = symbolSdk.VrfKeyLinkTransaction.create(
+          symbolSdk.Deadline.create(epochAdjustment),
+          accountInfo.supplementalPublicKeys.vrf.publicKey,
+          symbolSdk.LinkAction.Unlink,
+          networkType,
+        );
+        transactionList.push(vrfUnLinkTransaction.toAggregate(account.publicAccount));
+      }
+
+      if(accountInfo.supplementalPublicKeys.node){
+        //NodeKeyLinkTransaction （解除）
+        const nodeUnLinkTransaction = symbolSdk.NodeKeyLinkTransaction.create(
+          symbolSdk.Deadline.create(epochAdjustment),
+          accountInfo.supplementalPublicKeys.node.publicKey,
+          symbolSdk.LinkAction.Unlink,
+          networkType,
+        );
+        transactionList.push(nodeUnLinkTransaction.toAggregate(account.publicAccount));
+      }
+
+       //AccountKeyLinkTransaction （リンク）
+       const accountLinkTransaction = symbolSdk.AccountKeyLinkTransaction.create(
+        symbolSdk.Deadline.create(epochAdjustment),
+        remoteAccount.publicKey,
+        symbolSdk.LinkAction.Link,
+        networkType,
+      );
+      transactionList.push(accountLinkTransaction.toAggregate(account.publicAccount));
+
+      //VrfKeyLinkTransaction （リンク）
+      const vrfLinkTransaction = symbolSdk.VrfKeyLinkTransaction.create(
+        symbolSdk.Deadline.create(epochAdjustment),
+        vrfAccount.publicKey,
+        symbolSdk.LinkAction.Link,
+        networkType,
+      );
+      transactionList.push(vrfLinkTransaction.toAggregate(account.publicAccount));
+
+      //NodeKeyLinkTransaction （リンク）
+      const nodeLinkTransaction = symbolSdk.NodeKeyLinkTransaction.create(
+        symbolSdk.Deadline.create(epochAdjustment),
+        nodeInfo.nodePublicKey,
+        symbolSdk.LinkAction.Link,
+        networkType,
+      );
+      transactionList.push(nodeLinkTransaction.toAggregate(account.publicAccount));
+
+      //PersistentDelegationRequestTransactionを作成
+      const persistentDelegationRequestTransaction = symbolSdk.PersistentDelegationRequestTransaction.createPersistentDelegationRequestTransaction(
+        symbolSdk.Deadline.create(epochAdjustment),
+        remoteAccount.privateKey,
+        vrfAccount.privateKey,
+        nodeInfo.nodePublicKey,
+        networkType,
+      );
+      transactionList.push(persistentDelegationRequestTransaction.toAggregate(account.publicAccount));
+
+      //アグリゲートでまとめる
+      const aggregateTransaction = symbolSdk.AggregateTransaction.createComplete(
+        symbolSdk.Deadline.create(epochAdjustment),
+        transactionList,
+        networkType,
+        [],
+      ).setMaxFeeForAggregate(medianFeeMultiplier, 1);
+
+      //署名
+      signedTransaction = account.sign(aggregateTransaction, networkGenerationHash);
+      $('#tx').text(
+        `hash：${signedTransaction.hash}`+"\n"+
+        `payload：${signedTransaction.payload}`
+      );
+      $('#txBtn').prop("disabled", true);
+      $('#networkSendBtn').prop("disabled", false);
+    });
+
+
+    /**
+     * 2.トランザクションをネットワークにアナウンス
+     * **/
+    $('#networkSendBtn').on('click', function(){
+      //トランザクションをネットワークにアナウンス
+      transactionRepository.announce(signedTransaction).subscribe((x)=>{
+        $("#ex a").attr("href", explorer+signedTransaction.hash);
+        $("#ex a").text(explorer+signedTransaction.hash);
+        console.log(x)
+      },(err)=>{console.log(err)});
+    });
+
+  </script>
+</body>
+</html>
